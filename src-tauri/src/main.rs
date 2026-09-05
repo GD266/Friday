@@ -1,16 +1,20 @@
-//! FRIDAY backend — Phase 1 foundation.
+//! FRIDAY backend — Phase 2: AI brain + agent engine.
 //!
-//! Security posture (deliberate, Phase 1):
-//! - The backend exposes a small allowlist of read-only commands
-//!   (`ping`, `get_app_info`). There is intentionally NO shell execution,
-//!   NO filesystem access, and NO process spawning in this phase.
-//! - Every future system capability MUST be added as an explicit Tauri
-//!   command gated by a permission check, and mirrored by a frontend
-//!   `Tool` definition in `src/agent/tools/`. Unrestricted execution
-//!   must never be introduced.
+//! Security posture:
+//! - Small allowlist of commands: `ping`, `get_app_info` (read-only),
+//!   plus the AI provider surface (`provider_status`, `chat_stream`,
+//!   `cancel_chat`) implemented in `ai.rs`.
+//! - The API key lives ONLY in backend process environment and is never
+//!   accepted from, or returned to, the frontend.
+//! - Still NO shell execution, NO filesystem access, NO process spawning.
+//!   Every future system capability MUST be an explicit Tauri command gated
+//!   by a permission check and mirrored by a frontend `Tool` definition.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod ai;
+
+use ai::AiState;
 use serde::Serialize;
 
 /// Static metadata describing the running backend.
@@ -40,7 +44,14 @@ fn get_app_info() -> AppInfo {
 
 fn main() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![ping, get_app_info])
+        .manage(AiState::new())
+        .invoke_handler(tauri::generate_handler![
+            ping,
+            get_app_info,
+            ai::provider_status,
+            ai::chat_stream,
+            ai::cancel_chat
+        ])
         .run(tauri::generate_context!())
         .expect("failed to run FRIDAY application");
 }

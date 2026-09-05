@@ -7,23 +7,33 @@ import {
   useReducer,
 } from "react";
 import type { ReactNode } from "react";
-import { MockAgent } from "@/agent/core/MockAgent";
+import { AgentEngine } from "@/agent/engine/AgentEngine";
 import { createEventBus } from "@/agent/events/eventBus";
+import { resolveProvider } from "@/agent/providers/factory";
+import { ProviderError } from "@/agent/providers/types";
 import type {
   AgentEvent,
   AgentStatus,
   AgentTask,
 } from "@/agent/types/agent";
 import { AppError, reportError, toAppError } from "@/lib/errors";
+import { logger } from "@/lib/logger";
 import type { ChatMessage } from "@/types/chat";
 
 /**
  * Centralized assistant store (React context + reducer, no external deps).
  *
- * Owns: agent status, current task, transcript, activity timeline, error.
- * Voice input (Phase 2+) and real agent execution plug into `submitRequest`
- * and `setComposing` without changing this shape.
+ * Phase 2: owns the AgentEngine (real AI), streams reply deltas into a
+ * pending transcript message, and exposes cancellation. Voice input (Phase 3+)
+ * still plugs into `submitRequest` / `setComposing` without changing shape.
  */
+
+interface ProviderSnapshot {
+  label: string;
+  model: string;
+  /** null = not yet probed; false = missing key / unavailable. */
+  configured: boolean | null;
+}
 
 interface AgentState {
   status: AgentStatus;
@@ -33,17 +43,20 @@ interface AgentState {
   messages: ChatMessage[];
   events: AgentEvent[];
   error: AppError | null;
-  /** Monotonic counter for queue position display / debugging. */
   completedTasks: number;
+  provider: ProviderSnapshot;
 }
 
 type AgentAction =
   | { type: "COMPOSE"; composing: boolean }
-  | { type: "TASK_START"; task: AgentTask; message: ChatMessage }
+  | { type: "PROVIDER"; provider: ProviderSnapshot }
+  | { type: "TASK_START"; task: AgentTask; userMessage: ChatMessage; pending: ChatMessage }
   | { type: "STATUS"; status: AgentStatus }
   | { type: "EVENT"; event: AgentEvent }
-  | { type: "TASK_DONE"; reply: ChatMessage }
-  | { type: "TASK_ERROR"; error: AppError }
+  | { type: "STREAM_DELTA"; id: string; delta: string }
+  | { type: "TASK_DONE"; id: string; text: string }
+  | { type: "TASK_CANCELLED"; id: string }
+  | { type: "TASK_ERROR"; id: string; error: AppError }
   | { type: "ERROR_DISMISS" }
   | { type: "RESET" };
 
@@ -55,20 +68,43 @@ const initialState: AgentState = {
   events: [],
   error: null,
   completedTasks: 0,
+  provider: { label: "AI", model: "…", configured: null },
 };
 
 const MAX_EVENTS = 100;
+
+function appendDelta(messages: ChatMessage[], id: string, delta: string): ChatMessage[] {
+  return messages.map((message) =>
+    message.id === id
+      ? { ...message, text: message.text + delta }
+      : message,
+  );
+}
+
+function finalize(
+  messages: ChatMessage[],
+  id: string,
+  text: string,
+): ChatMessage[] {
+  return messages.map((message) =>
+    message.id === id
+      ? { ...message, text, streaming: false }
+      : message,
+  );
+}
 
 function reducer(state: AgentState, action: AgentAction): AgentState {
   switch (action.type) {
     case "COMPOSE":
       return { ...state, composing: action.composing };
+    case "PROVIDER":
+      return { ...state, provider: action.provider };
     case "TASK_START":
       return {
         ...state,
         status: "thinking",
         currentTask: action.task,
-        messages: [...state.messages, action.message],
+        messages: [...state.messages, action.userMessage, action.pending],
         error: null,
       };
     case "STATUS":
@@ -78,18 +114,44 @@ function reducer(state: AgentState, action: AgentAction): AgentState {
         ...state,
         events: [...state.events, action.event].slice(-MAX_EVENTS),
       };
+    case "STREAM_DELTA":
+      return { ...state, messages: appendDelta(state.messages, action.id, action.delta) };
     case "TASK_DONE":
       return {
         ...state,
         status: "completed",
         currentTask: state.currentTask
-          ? { ...state.currentTask, status: "completed", result: action.reply.text }
+          ? { ...state.currentTask, status: "completed", result: action.text }
           : null,
-        messages: [...state.messages, action.reply],
+        messages: finalize(state.messages, action.id, action.text),
         completedTasks: state.completedTasks + 1,
       };
-    case "TASK_ERROR":
-      return { ...state, status: "error", error: action.error };
+    case "TASK_CANCELLED":
+      return {
+        ...state,
+        status: "cancelled",
+        currentTask: state.currentTask
+          ? { ...state.currentTask, status: "cancelled" }
+          : null,
+        messages: finalize(state.messages, action.id, cancelNote(state.messages, action.id)),
+      };
+    case "TASK_ERROR": {
+      const failed = state.messages.find((message) => message.id === action.id);
+      const partial = (failed?.text ?? "").trim();
+      return {
+        ...state,
+        status: "error",
+        error: action.error,
+        messages:
+          partial.length > 0
+            ? finalize(
+                state.messages,
+                action.id,
+                `${partial}\n\n_Response interrupted: ${action.error.message}_`,
+              )
+            : state.messages.filter((message) => message.id !== action.id),
+      };
+    }
     case "ERROR_DISMISS":
       return {
         ...state,
@@ -97,10 +159,17 @@ function reducer(state: AgentState, action: AgentAction): AgentState {
         status: state.status === "error" ? "idle" : state.status,
       };
     case "RESET":
-      return { ...initialState, messages: state.messages, events: state.events };
+      return { ...initialState, messages: state.messages, events: state.events, provider: state.provider };
     default:
       return state;
   }
+}
+
+/** Keeps whatever streamed before cancellation, labelled honestly. */
+function cancelNote(messages: ChatMessage[], id: string): string {
+  const pending = messages.find((message) => message.id === id);
+  const partial = (pending?.text ?? "").trim();
+  return partial.length > 0 ? `${partial}\n\n_Request cancelled._` : "_Request cancelled._";
 }
 
 function createTaskId(): string {
@@ -114,7 +183,9 @@ interface AgentContextValue extends AgentState {
   /** Effective status shown in the UI (composing previews `listening`). */
   displayStatus: AgentStatus;
   canSubmit: boolean;
+  canCancel: boolean;
   submitRequest: (request: string) => Promise<void>;
+  cancelRequest: () => void;
   setComposing: (composing: boolean) => void;
   dismissError: () => void;
   resetSession: () => void;
@@ -123,7 +194,7 @@ interface AgentContextValue extends AgentState {
 const AgentContext = createContext<AgentContextValue | null>(null);
 
 const sharedBus = createEventBus();
-const sharedAgent = new MockAgent();
+const sharedEngine = new AgentEngine(null);
 
 export function AgentProvider({ children }: { children: ReactNode }) {
   const [state, dispatch] = useReducer(reducer, initialState);
@@ -132,6 +203,45 @@ export function AgentProvider({ children }: { children: ReactNode }) {
     return sharedBus.subscribe((event) => {
       dispatch({ type: "EVENT", event });
     });
+  }, []);
+
+  // Resolve the AI provider once (backend key probe, no secrets involved).
+  useEffect(() => {
+    let mounted = true;
+    resolveProvider()
+      .then((provider) => {
+        if (!mounted) {
+          return;
+        }
+        if (provider === null) {
+          dispatch({
+            type: "PROVIDER",
+            provider: { label: "AI", model: "unavailable", configured: false },
+          });
+          return;
+        }
+        sharedEngine.setProvider(provider);
+        dispatch({
+          type: "PROVIDER",
+          provider: {
+            label: provider.info.label,
+            model: provider.info.model,
+            configured: provider.info.configured,
+          },
+        });
+      })
+      .catch((error: unknown) => {
+        if (mounted) {
+          logger.error("ui", "Provider resolution failed.", { error });
+          dispatch({
+            type: "PROVIDER",
+            provider: { label: "AI", model: "unavailable", configured: false },
+          });
+        }
+      });
+    return () => {
+      mounted = false;
+    };
   }, []);
 
   const setComposing = useCallback((composing: boolean) => {
@@ -143,14 +253,18 @@ export function AgentProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const resetSession = useCallback(() => {
-    sharedAgent.cancel();
+    sharedEngine.cancel();
     dispatch({ type: "RESET" });
+  }, []);
+
+  const cancelRequest = useCallback(() => {
+    sharedEngine.cancel();
   }, []);
 
   const submitRequest = useCallback(
     async (request: string): Promise<void> => {
       const text = request.trim();
-      if (text.length === 0 || sharedAgent.isBusy) {
+      if (text.length === 0 || sharedEngine.isBusy) {
         return;
       }
       const task: AgentTask = {
@@ -159,59 +273,65 @@ export function AgentProvider({ children }: { children: ReactNode }) {
         createdAt: Date.now(),
         status: "thinking",
       };
+      const pendingId = `${task.id}-assistant`;
       dispatch({
         type: "TASK_START",
         task,
-        message: {
+        userMessage: {
           id: `${task.id}-user`,
           role: "user",
           text,
           timestamp: Date.now(),
         },
+        pending: {
+          id: pendingId,
+          role: "assistant",
+          text: "",
+          timestamp: Date.now(),
+          streaming: true,
+        },
       });
 
       try {
-        const reply = await sharedAgent.execute(task, {
+        const reply = await sharedEngine.execute(task, {
           onEvent: (input) => {
             sharedBus.emit(input);
           },
           onStatus: (status) => {
             dispatch({ type: "STATUS", status });
           },
-        });
-        dispatch({
-          type: "TASK_DONE",
-          reply: {
-            id: `${task.id}-assistant`,
-            role: "assistant",
-            text: reply,
-            timestamp: Date.now(),
+          onDelta: (delta) => {
+            dispatch({ type: "STREAM_DELTA", id: pendingId, delta });
           },
         });
+        dispatch({ type: "TASK_DONE", id: pendingId, text: reply });
       } catch (error) {
-        // Cancellation returns to idle silently; real failures surface.
-        if (error instanceof DOMException && error.name === "AbortError") {
+        if (error instanceof ProviderError && error.code === "cancelled") {
+          dispatch({ type: "TASK_CANCELLED", id: pendingId });
           return;
         }
         const appError = toAppError(error, "agent");
         reportError(appError);
-        dispatch({ type: "TASK_ERROR", error: appError });
+        dispatch({ type: "TASK_ERROR", id: pendingId, error: appError });
       }
     },
     [],
   );
 
   const value = useMemo<AgentContextValue>(() => {
+    const restState =
+      state.status === "idle" ||
+      state.status === "completed" ||
+      state.status === "cancelled";
     const displayStatus: AgentStatus =
-      state.composing &&
-      (state.status === "idle" || state.status === "completed")
-        ? "listening"
-        : state.status;
+      state.composing && restState ? "listening" : state.status;
     return {
       ...state,
       displayStatus,
-      canSubmit: !sharedAgent.isBusy,
+      canSubmit: !sharedEngine.isBusy,
+      canCancel: sharedEngine.isBusy,
       submitRequest,
+      cancelRequest,
       setComposing,
       dismissError,
       resetSession,
@@ -219,6 +339,7 @@ export function AgentProvider({ children }: { children: ReactNode }) {
   }, [
     state,
     submitRequest,
+    cancelRequest,
     setComposing,
     dismissError,
     resetSession,

@@ -5,9 +5,17 @@ import type { AgentEventKind } from "@/agent/types/agent";
 const KIND_DOT: Record<AgentEventKind, string> = {
   request_received: "bg-sky-400",
   status_changed: "bg-violet-400",
+  thinking_started: "bg-sky-300",
+  thinking_finished: "bg-sky-200",
+  response_started: "bg-sky-200",
+  response_completed: "bg-emerald-300",
+  tool_requested: "bg-amber-400",
   tool_started: "bg-amber-400",
+  tool_completed: "bg-emerald-400",
+  tool_failed: "bg-red-400",
   tool_finished: "bg-amber-200",
   message: "bg-zinc-300",
+  agent_error: "bg-red-400",
   task_completed: "bg-emerald-400",
   task_failed: "bg-red-400",
 };

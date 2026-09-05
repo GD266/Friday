@@ -1,11 +1,13 @@
 /**
- * Future-proof agent interfaces (Phase 1).
+ * Future-proof agent interfaces (Phase 2: real AI brain + agent engine).
  *
- * These types define the contract every agent implementation — mock today,
- * LLM-backed in later phases — must satisfy. Tools for terminal, filesystem,
- * application control, keyboard, mouse, browser, screenshot, git, and system
- * information will be added later as `Tool` implementations only; the
- * interfaces below already support them and must not change shape lightly.
+ * Phase 1 established these contracts with a mock agent; Phase 2 keeps every
+ * existing shape and extends it additively:
+ * - `AgentStatus` gains `responding` (streaming reply) and `cancelled`.
+ * - `AgentEventKind` gains thinking/response/tool-failure granularity.
+ * - `Tool` gains permission level, availability, and a minimal input schema
+ *   so Phase 2 tools can exist as safe definitions without execution.
+ * - `TaskRecord`/`TaskStatus` track the request lifecycle for the UI.
  */
 
 /** Lifecycle state of the assistant. Driven by the agent, rendered by the UI. */
@@ -14,8 +16,10 @@ export type AgentStatus =
   | "listening"
   | "thinking"
   | "executing"
+  | "responding"
   | "waiting"
   | "completed"
+  | "cancelled"
   | "error";
 
 /** Ordered lifecycle of a single user request. */
@@ -34,9 +38,17 @@ export interface AgentTask {
 export type AgentEventKind =
   | "request_received"
   | "status_changed"
+  | "thinking_started"
+  | "thinking_finished"
+  | "response_started"
+  | "response_completed"
+  | "tool_requested"
   | "tool_started"
+  | "tool_completed"
+  | "tool_failed"
   | "tool_finished"
   | "message"
+  | "agent_error"
   | "task_completed"
   | "task_failed";
 
@@ -57,21 +69,47 @@ export interface AgentEvent {
 export type AgentEventListener = (event: AgentEvent) => void;
 
 /**
- * A capability the agent may invoke. Phase 1 ships the interface only —
- * no concrete tools are registered (see `src/agent/tools/registry.ts`).
+ * Permission tier for a tool. The engine enforces the boundary:
+ * - `safe`: read-only, no approval needed (only tier usable in Phase 2).
+ * - `requiresApproval`: must pause in `waiting` for explicit user consent.
+ * - `system`: reserved for future OS-level control; never auto-approved.
+ */
+export type ToolPermission = "safe" | "requiresApproval" | "system";
+
+/**
+ * Execution availability. Phase 2 tools are `definition-only`: the agent can
+ * reason about them and record intent, but the engine always reports them as
+ * unavailable instead of executing anything.
+ */
+export type ToolAvailability = "definition-only" | "mock" | "live";
+
+/** Minimal JSON-schema-style input contract for a tool's arguments. */
+export interface ToolInputSchema {
+  readonly properties: Record<
+    string,
+    { readonly type: "string" | "number" | "boolean"; readonly description: string }
+  >;
+  readonly required?: readonly string[];
+}
+
+/**
+ * A capability the agent may invoke.
  *
- * Security contract for later phases:
- * - `requiresPermission` must be `true` for any tool that touches the system.
- * - The executor must obtain explicit user approval before running such tools.
+ * Security contract (unchanged from Phase 1, now enforced by the engine):
+ * - The AI model NEVER calls `execute` directly; only the engine does, after
+ *   passing the permission layer (`availability` + `requiresPermission`).
  * - Tools must validate and narrow their inputs; never accept raw shell strings.
  */
 export interface Tool<Input = unknown> {
-  /** Stable machine name, e.g. `"terminal"`, `"filesystem.read"`. */
+  /** Stable machine name, e.g. `"open_application"`. */
   readonly name: string;
   /** One-line human-readable description shown in permission prompts. */
   readonly description: string;
   /** Whether user approval is required before execution. */
   readonly requiresPermission: boolean;
+  readonly permission: ToolPermission;
+  readonly availability: ToolAvailability;
+  readonly inputSchema: ToolInputSchema;
   execute: (input: Input) => Promise<ToolResult>;
 }
 
@@ -91,6 +129,24 @@ export interface ToolResult {
 export interface AgentCallbacks {
   onEvent: (event: Omit<AgentEvent, "id" | "timestamp">) => void;
   onStatus: (status: AgentStatus) => void;
+  /** Streaming reply deltas; the store appends them to the pending message. */
+  onDelta?: (text: string) => void;
+}
+
+/** Request lifecycle tracked by the AgentEngine and shown in the UI. */
+export type TaskStatus =
+  | "queued"
+  | "running"
+  | "waiting"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+/** Full lifecycle record for one user request. */
+export interface TaskRecord extends AgentTask {
+  taskStatus: TaskStatus;
+  readonly startedAt: number;
+  finishedAt?: number;
 }
 
 /**

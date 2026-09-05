@@ -6,8 +6,10 @@ const STATUS_COPY: Record<AgentStatus, { title: string; hint: string }> = {
   listening: { title: "LISTENING", hint: "Composing — voice input plugs in here" },
   thinking: { title: "THINKING", hint: "Reasoning over your request" },
   executing: { title: "EXECUTING", hint: "Running the planned step" },
+  responding: { title: "RESPONDING", hint: "Streaming the reply" },
   waiting: { title: "WAITING", hint: "Paused — approval required" },
   completed: { title: "COMPLETED", hint: "Task finished successfully" },
+  cancelled: { title: "CANCELLED", hint: "Request stopped — ready for the next one" },
   error: { title: "ERROR", hint: "Task failed — see details below" },
 };
 
@@ -16,8 +18,10 @@ const ACCENT: Record<AgentStatus, string> = {
   listening: "bg-sky-400",
   thinking: "bg-sky-300",
   executing: "bg-violet-400",
+  responding: "bg-sky-200",
   waiting: "bg-amber-400",
   completed: "bg-emerald-400",
+  cancelled: "bg-zinc-400",
   error: "bg-red-400",
 };
 
@@ -33,6 +37,7 @@ export function AssistantCore() {
   const active =
     displayStatus === "thinking" ||
     displayStatus === "executing" ||
+    displayStatus === "responding" ||
     displayStatus === "listening";
 
   return (

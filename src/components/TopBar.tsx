@@ -9,11 +9,23 @@ const CONNECTION_STYLE: Record<ConnectionState, { dot: string; label: string }> 
   checking: { dot: "bg-zinc-500", label: "CONNECTING" },
 };
 
-/** Top area: FRIDAY branding left, backend connection status right. */
+/** Top area: FRIDAY branding left, provider + connection status right. */
 export function TopBar() {
   const connection = useBackendStatus();
-  const { resetSession } = useAgent();
+  const { resetSession, provider } = useAgent();
   const style = CONNECTION_STYLE[connection];
+  const providerLabel =
+    provider.configured === null
+      ? "AI …"
+      : provider.configured
+        ? provider.model
+        : "NO API KEY";
+  const providerDot =
+    provider.configured === null
+      ? "bg-zinc-500"
+      : provider.configured
+        ? "bg-sky-400"
+        : "bg-red-400";
 
   return (
     <header className="flex items-center justify-between px-6 pt-5 sm:px-8">
@@ -34,6 +46,17 @@ export function TopBar() {
         >
           RESET
         </button>
+        <div
+          className="hidden items-center gap-2 rounded-full border border-white/10 bg-white/[0.03] px-3 py-1.5 sm:flex"
+          role="status"
+          aria-label={`AI provider ${providerLabel}`}
+          title={provider.configured ? provider.label : "Set FRIDAY_API_KEY and restart"}
+        >
+          <span className={`h-1.5 w-1.5 rounded-full ${providerDot}`} />
+          <span className="max-w-36 truncate text-[11px] font-medium tracking-[0.15em] text-zinc-300">
+            {providerLabel.toUpperCase()}
+          </span>
+        </div>
         <div
           className="flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.03] px-3 py-1.5"
           role="status"

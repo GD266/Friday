@@ -4,6 +4,8 @@ export interface ChatMessage {
   readonly role: "user" | "assistant";
   readonly text: string;
   readonly timestamp: number;
+  /** True while this reply is still streaming in. */
+  readonly streaming?: boolean;
 }
 
 export type ConnectionState = "online" | "offline" | "web-preview" | "checking";

@@ -43,7 +43,19 @@ export function Transcript() {
                   FRIDAY
                 </p>
               ) : null}
-              <p className="break-words">{message.text}</p>
+              <p className="break-words">
+                {message.text.length > 0 ? (
+                  message.text
+                ) : (
+                  <span className="text-zinc-600">···</span>
+                )}
+                {message.streaming ? (
+                  <span
+                    aria-hidden="true"
+                    className="anim-breathe ml-0.5 inline-block h-3.5 w-[2px] translate-y-0.5 bg-sky-300"
+                  />
+                ) : null}
+              </p>
             </div>
           </li>
         ))}
